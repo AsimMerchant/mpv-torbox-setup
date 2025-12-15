@@ -1,0 +1,30 @@
+# MPV Binaries and DLLs (download separately on each machine)
+*.exe
+*.dll
+*.com
+
+# MPV folders with binaries
+/doc/
+/installer/
+/mpv/
+
+# Temporary files
+*.7z
+*.zip
+7zr.exe
+
+# Windows system files
+Thumbs.db
+desktop.ini
+
+# MPV runtime files (generated during playback)
+portable_config/cache/
+portable_config/watch_later/
+
+# Keep only configs and docs
+# Whitelist what we want:
+!/portable_config/
+!/README.md
+!/QUICK_START.txt
+!/Start_MPV.bat
+!/.gitignore

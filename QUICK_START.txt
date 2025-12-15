@@ -1,0 +1,31 @@
+# Quick Reference Card - MPV + TorBox
+
+## 🎬 To Watch Content:
+1. Copy link from TorBox dashboard
+2. Double-click `mpv.exe`
+3. Press **Ctrl+V**
+4. Done!
+
+## 🔑 Most Used Keys:
+- **Ctrl+V** → Paste TorBox URL
+- **Space** → Play/Pause
+- **F** → Fullscreen
+- **Ctrl+I** → Show VRAM stats
+- **F1-F4** → Switch power profiles
+- **S** → Screenshot
+- **Q** → Quit
+
+## 🔋 Battery Modes:
+- **F1** → D3D11 (Default, stable)
+- **F2** → D3D12 (Test for battery)  
+- **F4** → Low Power (extreme saving)
+
+## 📊 Check Performance:
+Press **Ctrl+I** → Look for:
+- **hwdec: d3d11va** ✅ (Good - GPU active)
+- **hwdec: no** ❌ (Bad - CPU decoding)
+- **Dropped: 0** ✅ (Smooth playback)
+
+---
+
+Full guide → See README.md
