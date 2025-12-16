@@ -21,6 +21,10 @@ desktop.ini
 portable_config/cache/
 portable_config/watch_later/
 
+# Environment variables (API keys, secrets)
+.env
+.env.local
+
 # Keep only configs and docs
 # Whitelist what we want:
 !/portable_config/
