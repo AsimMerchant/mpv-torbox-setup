@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 TorBox TUI Browser
-Browse and stream TorBox content with MPV, with watch tracking
+Browse and stream TorBox content with MPV, with watch tracking and JDownloader2 integration
 """
 
 import base64
@@ -11,20 +11,118 @@ import os
 import json
 import subprocess
 import time
+from datetime import datetime
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.text import Text
+import myjdapi
 
 console = Console()
 
 SESSION_FILE = ".torbox_session.json"
+
+# Global JD API instance
+jd_api = None
+jd_device = None
 
 def load_api_key():
     """Load and decode API key from .env"""
     load_dotenv('.env')
     encoded_key = os.getenv('TORBOX_API_KEY')
     return base64.b64decode(encoded_key).decode('utf-8')
+
+def load_jd_credentials():
+    """Load My.JDownloader credentials from .env"""
+    load_dotenv('.env')
+    email = os.getenv('MYJD_EMAIL')
+    encoded_password = os.getenv('MYJD_PASSWORD')
+    device_name = os.getenv('MYJD_DEVICE_NAME')
+    
+    if not all([email, encoded_password, device_name]):
+        return None, None, None
+    
+    password = base64.b64decode(encoded_password).decode('utf-8')
+    return email, password, device_name
+
+def ensure_jd2_running():
+    """Check if JDownloader2 is running, launch it if not"""
+    jd2_path = r"C:\Users\asrie\AppData\Local\JDownloader 2"
+    jd2_exe = os.path.join(jd2_path, "JDownloader2.exe")
+    
+    # Check if JDownloader2 process is running
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command", "Get-Process -Name 'JDownloader2' -ErrorAction SilentlyContinue"],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.stdout.strip():
+            # JD2 is already running
+            return True
+        
+        # JD2 not running, launch it
+        if not os.path.exists(jd2_exe):
+            console.print(f"[red]JDownloader2.exe not found at: {jd2_exe}[/red]")
+            return False
+        
+        console.print("[cyan]Starting JDownloader2...[/cyan]")
+        subprocess.Popen([jd2_exe], cwd=jd2_path)
+        
+        # Wait a bit for JD2 to start
+        console.print("[cyan]Waiting for JDownloader2 to initialize (10 seconds)...[/cyan]")
+        time.sleep(10)
+        
+        return True
+    except Exception as e:
+        console.print(f"[red]Error checking/starting JDownloader2: {e}[/red]")
+        return False
+
+def connect_to_jd():
+    """Connect to My.JDownloader and get device"""
+    global jd_api, jd_device
+    
+    if jd_device:
+        return jd_device
+    
+    # Ensure JD2 is running first
+    if not ensure_jd2_running():
+        console.print("[red]Cannot start JDownloader2[/red]")
+        return None
+    
+    email, password, device_name = load_jd_credentials()
+    if not email:
+        console.print("[yellow]My.JDownloader credentials not configured in .env[/yellow]")
+        return None
+    
+    try:
+        jd_api = myjdapi.Myjdapi()
+        jd_api.set_app_key("TORBOX_BROWSER")
+        jd_api.connect(email, password)
+        jd_api.update_devices()
+        jd_device = jd_api.get_device(device_name)
+        
+        if not jd_device:
+            console.print(f"[red]Device '{device_name}' not found[/red]")
+            return None
+        
+        return jd_device
+    except Exception as e:
+        console.print(f"[red]Failed to connect to My.JDownloader: {e}[/red]")
+        return None
+
+def load_watch_folder():
+    """Load JDownloader2 watch folder from .env"""
+    load_dotenv('.env')
+    watch_folder = os.getenv('JDOWNLOADER_WATCH_FOLDER')
+    if not watch_folder:
+        console.print("[yellow]JDOWNLOADER_WATCH_FOLDER not found in .env[/yellow]")
+        return None
+    if not os.path.exists(watch_folder):
+        console.print(f"[red]Watch folder does not exist: {watch_folder}[/red]")
+        return None
+    return watch_folder
 
 def load_session():
     """Load previous session data"""
@@ -48,6 +146,123 @@ def clear_session():
         console.print("[green]✓ Watch history cleared![/green]")
     else:
         console.print("[yellow]No watch history to clear.[/yellow]")
+
+def check_if_exists_in_jd2(device, url):
+    """Check if URL already exists in JDownloader2 (linkgrabber or downloads)"""
+    try:
+        # Check linkgrabber
+        linkgrabber_links = device.linkgrabber.query_links([{
+            "url": True,
+            "bytesTotal": False,
+            "enabled": False,
+            "maxResults": -1,
+            "startAt": 0
+        }])
+        
+        for link in linkgrabber_links:
+            if link.get('url') == url:
+                return True, "linkgrabber"
+        
+        # Check downloads
+        download_links = device.downloads.query_links([{
+            "url": True,
+            "bytesTotal": False,
+            "enabled": False,
+            "maxResults": -1,
+            "startAt": 0
+        }])
+        
+        for link in download_links:
+            if link.get('url') == url:
+                return True, "downloads"
+        
+        return False, None
+    except Exception as e:
+        # If check fails, assume it doesn't exist and continue
+        console.print(f"[yellow]Warning: Could not check for duplicates: {e}[/yellow]")
+        return False, None
+
+def send_file_to_jd2(api_key, torrent_id, file_id, file_name, device=None):
+    """Send a single file to JDownloader2 via API"""
+    if not device:
+        device = connect_to_jd()
+        if not device:
+            console.print("[red]JDownloader2 not connected[/red]")
+            return False
+    
+    # Get the CDN download URL
+    cdn_url = get_streaming_url(api_key, torrent_id, file_id)
+    if not cdn_url:
+        console.print(f"[red]Failed to get URL for: {file_name}[/red]")
+        return False
+    
+    # Check if already in JD2
+    exists, location = check_if_exists_in_jd2(device, cdn_url)
+    if exists:
+        console.print(f"[yellow]⊘ Already in {location}: {file_name}[/yellow]")
+        return False
+    
+    try:
+        # Add to linkgrabber with autostart enabled
+        device.linkgrabber.add_links([{
+            "autostart": True,
+            "links": cdn_url,
+            "packageName": "TorBox Downloads",
+            "destinationFolder": None,
+            "extractPassword": None,
+            "priority": "DEFAULT",
+            "downloadPassword": None,
+            "overwritePackagizerRules": False
+        }])
+        console.print(f"[green]✓ Added & started: {file_name}[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[red]Failed to send to JD2: {e}[/red]")
+        return False
+
+def send_folder_to_jd2(api_key, torrent_id, files_list):
+    """Send all files in a folder to JDownloader2 via API"""
+    if not files_list:
+        console.print("[yellow]No files in this folder[/yellow]")
+        return
+    
+    device = connect_to_jd()
+    if not device:
+        return
+    
+    console.print(f"\n[cyan]Sending {len(files_list)} files to JDownloader2...[/cyan]")
+    success_count = 0
+    
+    for file_info in files_list:
+        file_id = file_info['file_obj']['id']
+        file_name = file_info['name']
+        if send_file_to_jd2(api_key, torrent_id, file_id, file_name, device):
+            success_count += 1
+        time.sleep(0.1)  # Small delay to avoid overwhelming JD2
+    
+    console.print(f"\n[green]✓ Successfully sent {success_count}/{len(files_list)} files to JDownloader2[/green]")
+
+def send_torrent_to_jd2(api_key, torrent_id, all_files):
+    """Send all files in a torrent to JDownloader2 via API"""
+    if not all_files:
+        console.print("[yellow]No files in this torrent[/yellow]")
+        return
+    
+    device = connect_to_jd()
+    if not device:
+        return
+    
+    console.print(f"\n[cyan]Sending entire torrent ({len(all_files)} files) to JDownloader2...[/cyan]")
+    success_count = 0
+    
+    for file_obj in all_files:
+        file_id = file_obj.get('id')
+        file_name = file_obj.get('short_name', 'unknown')
+        if send_file_to_jd2(api_key, torrent_id, file_id, file_name, device):
+            success_count += 1
+        time.sleep(0.1)  # Small delay to avoid overwhelming JD2
+    
+    console.print(f"\n[green]✓ Successfully sent {success_count}/{len(all_files)} files to JDownloader2[/green]")
 
 def fetch_torrents(api_key):
     """Fetch all torrents from TorBox"""
@@ -237,6 +452,7 @@ def browse_torrent(torrent, api_key, session_data):
         
         console.print(f"\n0. {'[yellow]Go back[/yellow]' if current_path else '[red]Exit[/red]'}")
         console.print("c. [cyan]Clear watch history[/cyan]")
+        console.print("d. [magenta]Download (JDownloader2)[/magenta]")
         
         # Get user input
         choice = Prompt.ask("\n[bold]Select item").strip().lower()
@@ -252,6 +468,24 @@ def browse_torrent(torrent, api_key, session_data):
             clear_session()
             session_data = {'watch_status': {}}
             input("\nPress Enter to continue...")
+        elif choice == 'd':
+            # Download with JDownloader2
+            # If at root, ask to download entire torrent
+            if not current_path:
+                confirm = Prompt.ask(f"\n[yellow]Download entire torrent ({len(files)} files)?[/yellow]", choices=["y", "n"], default="n")
+                if confirm == 'y':
+                    send_torrent_to_jd2(api_key, torrent_id, files)
+                    input("\nPress Enter to continue...")
+            else:
+                # Download current folder's files
+                if items['files']:
+                    confirm = Prompt.ask(f"\n[yellow]Download all files in this folder ({len(items['files'])} files)?[/yellow]", choices=["y", "n"], default="n")
+                    if confirm == 'y':
+                        send_folder_to_jd2(api_key, torrent_id, items['files'])
+                        input("\nPress Enter to continue...")
+                else:
+                    console.print("[yellow]No files to download in this folder[/yellow]")
+                    input("\nPress Enter to continue...")
         else:
             try:
                 choice_idx = int(choice) - 1
@@ -267,7 +501,7 @@ def browse_torrent(torrent, api_key, session_data):
                         console.print(f"Size: {format_size(item_data['size'])}")
                         
                         action = Prompt.ask("\n[bold]Action[/bold]", 
-                                          choices=["p", "c", "b"],
+                                          choices=["p", "c", "d", "b"],
                                           default="p",
                                           show_choices=True,
                                           show_default=True)
@@ -305,6 +539,12 @@ def browse_torrent(torrent, api_key, session_data):
                             session_data['torrent_name'] = torrent.get('name')
                             save_session(session_data)
                             console.print("[green]✓ Marked as completed![/green]")
+                        
+                        elif action == 'd':
+                            # Download with JDownloader2
+                            file_id = item_data['file_obj']['id']
+                            send_file_to_jd2(api_key, torrent_id, file_id, item_name)
+                            input("\nPress Enter to continue...")
                         
                         # action == 'b' just continues the loop
                 else:
@@ -385,9 +625,32 @@ def main():
                 console.print(f"{i}. [cyan]{torrent.get('name', 'Unknown')}[/cyan]")
                 console.print(f"   [dim]ID: {torrent.get('id')} | Files: {files_count}[/dim]\n")
             
+            console.print("\n[dim]Actions:[/dim]")
+            console.print("  [dim]• Enter number to browse torrent[/dim]")
+            console.print("  [dim]• Enter 'd' followed by number (e.g., 'd1') to download entire torrent[/dim]")
+            
             choice = Prompt.ask("\n[bold]Select torrent (or 0 to search again)[/bold]").strip()
             
             if choice == '0':
+                continue
+            
+            # Check for download command (e.g., 'd1', 'd2')
+            if choice.lower().startswith('d'):
+                try:
+                    torrent_idx = int(choice[1:]) - 1
+                    if 0 <= torrent_idx < len(matches):
+                        selected_torrent = matches[torrent_idx]
+                        files = selected_torrent.get('files', [])
+                        confirm = Prompt.ask(f"\n[yellow]Download entire torrent '{selected_torrent.get('name')}' ({len(files)} files)?[/yellow]", choices=["y", "n"], default="n")
+                        if confirm == 'y':
+                            send_torrent_to_jd2(api_key, selected_torrent.get('id'), files)
+                            input("\nPress Enter to continue...")
+                    else:
+                        console.print("[red]Invalid selection![/red]")
+                        input("\nPress Enter to continue...")
+                except (ValueError, IndexError):
+                    console.print("[red]Invalid download command! Use 'd' followed by torrent number (e.g., 'd1')[/red]")
+                    input("\nPress Enter to continue...")
                 continue
             
             try:
